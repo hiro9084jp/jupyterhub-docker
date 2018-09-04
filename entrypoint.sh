@@ -8,4 +8,4 @@ sed -i -e "s%__JPYNB_S3_BUCKET_NAME__%${JPYNB_S3_BUCKET_NAME}%g" /usr/local/etc/
 
 rsync -auzv /usr/local/etc/jupyter/ /etc/jupyter/
 
-jupyterhub --config=/etc/jupyter/jupyterhub_config.py --JupyterHub.bind_url="http://$(curl -Lfs http://169.254.169.254/latest/meta-data/local-ipv4):8000" --JupyterHub.hub_ip="$(curl -Lfs http://169.254.169.254/latest/meta-data/local-ipv4)"
+jupyterhub --config=/etc/jupyter/jupyterhub_config.py --JupyterHub.hub_ip="$(curl -Lfs http://169.254.169.254/latest/meta-data/local-ipv4)"

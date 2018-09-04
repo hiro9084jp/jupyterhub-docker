@@ -10,6 +10,7 @@ from ecs_spawner import (
 c.JupyterHub.authenticator_class = GenericOAuthenticator
 
 c.JupyterHub.db_url = os.environ.get('DB_URL', 'sqlite:///jupyterhub.sqlite')
+c.JupyterHub.log_level = 'DEBUG'
 
 c.Authenticator.auto_login = True
 c.Authenticator.enable_auth_state = True

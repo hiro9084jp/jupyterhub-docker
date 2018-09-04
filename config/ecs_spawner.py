@@ -78,6 +78,7 @@ class EcsSpawner(Spawner):
                 self.calling_run_task = True
                 run_response = await _run_task(self.log, self.endpoint)
                 self.task_arn = run_response['tasks'][0]['taskArn']
+                self.log.debug("Set task arn to (%s)", self.task_arn)
             finally:
                 self.calling_run_task = False
 
@@ -95,6 +96,8 @@ class EcsSpawner(Spawner):
                 if status == 'RUNNING':
                     self.task_ip = ip
                     self.task_port = port
+                    self.log.debug("Set task ip to (%s)", self.task_ip)
+                    self.log.debug("Set task port to (%s)", self.task_port)
                     break
 
                 await gen.sleep(1)

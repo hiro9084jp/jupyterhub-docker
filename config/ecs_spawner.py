@@ -40,9 +40,6 @@ class EcsSpawner(Spawner):
     # to check the task.
     calling_run_task = Bool(False)
 
-    num_polls = Int(0)
-    max_polls = 600
-
     def load_state(self, state):
         ''' Misleading name: this "loads" the state onto self, to be used by other methods '''
 
@@ -52,6 +49,7 @@ class EcsSpawner(Spawner):
         self.task_arn = state.get('task_arn', '')
         self.task_ip = state.get('task_ip', '')
         self.task_port = state.get('task_port', 0)
+        self.progress_buffer = AsyncIteratorBuffer()
 
     def get_state(self):
         ''' Misleading name: the return value of get_state is saved to the database in order
@@ -73,54 +71,93 @@ class EcsSpawner(Spawner):
         return \
             None if self.calling_run_task else \
             0 if (self.task_arn == '' or self.task_ip == '' or self.task_port == 0) else \
-            None if (await _get_task_status_ip_port(self.log, self.endpoint, self.task_arn))[0] in ALLOWED_STATUSES else \
+            None if (await _get_task_status(self.log, self.endpoint, self.task_arn)) in ALLOWED_STATUSES else \
             1
 
     async def start(self):
         # We sure we can resume during an interrupted startup
         # The sleeps are to work well with the "progress" generator
 
-        self.has_task_arn = Future()
-        self.has_task_ip = Future()
-        self.has_server_started = Future()
-        self.num_polls = 0
-
+        self.progress_buffer.write({
+            'progress': 10,
+            'message': 'Assigning ID...',
+        })
         if self.task_arn == '':
             try:
                 self.calling_run_task = True
                 run_response = await _run_task(self.log, self.endpoint, self.cmd + ['--debug'], self.get_env())
                 self.task_arn = run_response['tasks'][0]['taskArn']
-                self.log.debug("Set task arn to (%s)", self.task_arn)
             finally:
                 self.calling_run_task = False
 
-        self.has_task_arn.set_result(None)
+        self.progress_buffer.write({
+            'progress': 20,
+            'message': f'Assigned ID: {self.task_arn}',
+        })
+
+        await gen.sleep(1)
+        self.progress_buffer.write({
+            'message': f'Assigning port...',
+        })
+
+        # Not really anything to do, but for consistency, we show a message
+        await gen.sleep(1)
+        if self.task_port == 0:
+            self.task_port = self.endpoint['port']
+        self.progress_buffer.write({
+            'progress': 30,
+            'message': f'Assigned port: {self.task_port}',
+        })
+
+        await gen.sleep(1)
+        self.progress_buffer.write({
+            'message': f'Assigning IP address...',
+        })
+        num_polls = 0
+        while self.task_ip == '':
+            num_polls += 1
+            if num_polls >= 600:
+                raise Exception('Task %s took too long to find IP address'.format(self.task_arn))
+
+            self.task_ip = await _get_task_ip(self.log, self.endpoint, self.task_arn)
+            self.progress_buffer.write({
+                'progress': 30,
+            })
+            await gen.sleep(1)
+
+        self.progress_buffer.write({
+            'progress': 40,
+            'message': f'Assigned IP address: {self.task_ip}',
+        })
         await gen.sleep(1)
 
-        if self.task_ip == '' or self.task_port == 0:
-            while True:
-                self.num_polls += 1
-                if self.num_polls >= 600:
-                    raise Exception('Task %s took too long to become RUNNING'.format(self.task_arn))
+        self.progress_buffer.write({
+            'message': f'Waiting for server to start.',
+        })
 
-                status, ip, port = await _get_task_status_ip_port(self.log, self.endpoint, self.task_arn)
-                if status not in ALLOWED_STATUSES:
-                    raise Exception('Task %s is %s'.format(self.task_arn, status))
+        num_polls = 0
+        status = ''
+        while status != 'RUNNING':
+            num_polls += 1
+            if num_polls >= 600:
+                raise Exception('Task %s took too long to become running'.format(self.task_arn))
 
-                if status == 'RUNNING':
-                    self.task_ip = ip
-                    self.task_port = port
-                    self.log.debug("Set task ip to (%s)", self.task_ip)
-                    self.log.debug("Set task port to (%s)", self.task_port)
-                    break
+            status = await _get_task_status(self.log, self.endpoint, self.task_arn)
+            if status not in ALLOWED_STATUSES:
+                raise Exception('Task %s is %s'.format(self.task_arn, status))
 
-                await gen.sleep(1)
+            self.progress_buffer.write({
+                'progress': 40,
+            })
+            await gen.sleep(1)
 
-        self.has_task_ip.set_result(None)
+        self.progress_buffer.write({
+            "progress": 100,
+            "message": 'Server has started',
+        })
+
         await gen.sleep(1)
-
-        self.has_server_started.set_result(None)
-        await gen.sleep(1)
+        self.progress_buffer.close()
 
         return (self.task_ip, self.task_port)
 
@@ -133,39 +170,8 @@ class EcsSpawner(Spawner):
         self.log.debug('Stopped task (%s)... (done)', self.task_arn)
 
     async def progress(self):
-        yield {
-            'progress': 10,
-            'message': 'Starting server... assigning ID',
-        }
-
-        await self.has_task_arn
-        yield {
-            'progress': 20,
-            'message': f'Starting server... assigned ID {self.task_arn}',
-        }
-
-        await gen.sleep(1)
-        yield {
-            'message': f'Starting server... assigning IP address...',
-        }
-
-        await self.has_task_ip
-        yield {
-            'progress': 30,
-            'message': f'Starting server... assigned IP address {self.task_ip}',
-        }
-        
-        await gen.sleep(1)
-        yield {
-            'message': f'Starting server... launching container. May take a few minutes.',
-        }
-
-        await self.has_server_started
-        yield {
-            "progress": 100,
-            "message": 'Server has started',
-        }
-        await gen.sleep(1)
+        async for message in self.progress_buffer:
+            yield message
 
     def clear_state(self):
         super().clear_state()
@@ -184,18 +190,23 @@ async def _stop_task(logger, endpoint, task_arn):
     })
 
 
-async def _get_task_status_ip_port(logger, endpoint, task_arn):
+async def _get_task_ip(logger, endpoint, task_arn):
     described_tasks = await _describe_tasks(logger, endpoint, [task_arn])
     task = described_tasks['tasks'][0]
-    status = task['lastStatus']
     ip_address_attachements = [
         attachment['value']
         for attachment in task['attachments'][0]['details']
         if attachment['name'] == 'privateIPv4Address'
     ]
     ip_address = ip_address_attachements[0] if ip_address_attachements else ''
-    port = endpoint['port']
-    return status, ip_address, port
+    return ip_address
+
+
+async def _get_task_status(logger, endpoint, task_arn):
+    described_tasks = await _describe_tasks(logger, endpoint, [task_arn])
+    task = described_tasks['tasks'][0]
+    status = task['lastStatus']
+    return status
 
 
 async def _describe_tasks(logger, endpoint, task_arns):
@@ -313,3 +324,32 @@ def _aws_auth_headers(service, endpoint, method, path, query, headers, payload):
             f'SignedHeaders={signed_headers}, Signature=' + signature()
         ),
     }
+
+
+class AsyncIteratorBuffer:
+    ''' Asynchronous iterator to be used in Spawner::progress, that can be
+    controlled from Spawner::start
+
+    Deals with both messages being added faster than they are read, and 
+    messages being read faster than they are added
+    '''
+
+    def __init__(self):
+        self.futures = [Future()]
+
+    def __aiter__(self):
+        return self
+
+    def close(self):
+        # Messages must not be added after this
+        self.futures[-1].set_exception(StopAsyncIteration())
+
+    def write(self, item):
+        self.futures[-1].set_result(item)
+        self.futures.append(Future())
+
+    async def __anext__(self):
+        future = self.futures.pop(0)
+        if not self.futures:
+            self.futures.append(Future())
+        return await future

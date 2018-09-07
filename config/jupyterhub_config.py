@@ -7,7 +7,16 @@ from ecs_spawner import (
     EcsSpawner,
 )
 
-c.JupyterHub.authenticator_class = GenericOAuthenticator
+class AuthenticatorRemovedAtSymbol(GenericOAuthenticator):
+    # It looks like the @ symbol in usernames causes lots of strange issues
+    # with the notebooks
+    async def authenticate(self, handler, data=None):
+        auth = await super().authenticate(handler, data)
+        return {
+            **auth,
+            'name': auth['name'].replace('@', '.'),
+        }
+c.JupyterHub.authenticator_class = AuthenticatorRemovedAtSymbol
 
 c.JupyterHub.db_url = os.environ.get('DB_URL', 'sqlite:///jupyterhub.sqlite')
 c.JupyterHub.log_level = 'DEBUG'

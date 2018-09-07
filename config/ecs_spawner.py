@@ -11,6 +11,9 @@ from jupyterhub.spawner import (
 from tornado import (
     gen,
 )
+from tornado.concurrent import (
+    Future,
+)
 from tornado.httpclient import (
     AsyncHTTPClient,
     HTTPError,
@@ -25,16 +28,20 @@ from traitlets import (
 
 
 class EcsSpawner(Spawner):
-    # We mostly are able to call the AWS API to determine status. However, when we yield the
-    # event loop to create the task, if there is a poll before the creation is complete,
-    # we must behave as though we are running/starting, but we have no IDs to use with which
-    # to check the task.
-    calling_run_task = False
 
     endpoint = Dict(config=True)
     task_arn = Unicode('')
     task_ip = Unicode('')
     task_port = Int(0)
+
+    # We mostly are able to call the AWS API to determine status. However, when we yield the
+    # event loop to create the task, if there is a poll before the creation is complete,
+    # we must behave as though we are running/starting, but we have no IDs to use with which
+    # to check the task.
+    calling_run_task = Bool(False)
+
+    num_polls = Int(0)
+    max_polls = 600
 
     def load_state(self, state):
         ''' Misleading name: this "loads" the state onto self, to be used by other methods '''
@@ -73,20 +80,25 @@ class EcsSpawner(Spawner):
         # will the details of the task be saved / restored from the database?
         # This is coded up to be able to deal with both "yes" and "no"
 
+        self.has_task_arn = tornado.concurrent.Future()
+        self.has_task_ip = tornado.concurrent.Future()
+        self.has_server_started = tornado.concurrent.Future()
+        self.num_polls = 0
+
         if self.task_arn == '':
             try:
                 self.calling_run_task = True
                 run_response = await _run_task(self.log, self.endpoint)
                 self.task_arn = run_response['tasks'][0]['taskArn']
                 self.log.debug("Set task arn to (%s)", self.task_arn)
+                self.has_task_arn.set_result(None)
             finally:
                 self.calling_run_task = False
 
         if self.task_ip == '' or self.task_port == 0:
-            i = 0
             while True:
-                i += 1
-                if i >= 600:
+                self.num_polls += 1
+                if self.num_polls >= 600:
                     raise Exception('Task %s took too long to become RUNNING'.format(self.task_arn))
 
                 status, ip, port = await _get_task_status_ip_port(self.log, self.endpoint, self.task_arn)
@@ -98,10 +110,12 @@ class EcsSpawner(Spawner):
                     self.task_port = port
                     self.log.debug("Set task ip to (%s)", self.task_ip)
                     self.log.debug("Set task port to (%s)", self.task_port)
+                    self.has_task_ip.set_result(None)
                     break
 
                 await gen.sleep(1)
 
+        self.has_server_started.set_result(None)
         return (self.task_ip, self.task_port)
 
     async def stop(self, now=False):
@@ -111,6 +125,36 @@ class EcsSpawner(Spawner):
         self.log.debug('Stopping task (%s)...', self.task_arn)
         await _stop_task(self.log, self.endpoint, self.task_arn)
         self.log.debug('Stopped task (%s)... (done)', self.task_arn)
+
+    async def progress(self):
+        yield {
+            'progress': 10
+            'message': 'Starting server... assigning ID',
+        }
+        await self.has_task_arn
+        yield {
+            'progress': 20
+            'message': f'Starting server... assigned ID {self.task_arn}',
+        }
+
+        yield {
+            'message': f'Starting server... assigning IP address...',
+        }
+        await self.has_ip_address
+        yield {
+            'progress': 30
+            'message': f'Starting server... assigned IP address {self.task_ip}',
+        }
+        
+        yield {
+            'message': f'Starting server... launching container. May take a few minutes.',
+        }
+        await self.has_server_started
+        yield {
+            "progress": 100
+            "message": 'Server has started',
+        }
+        await gen.sleep(1)
 
     def clear_state(self):
         super().clear_state()

@@ -50,7 +50,8 @@ class EcsSpawner(Spawner):
 
         # Called when first created: we might have no state from a previous invocation
         self.task_arn = state.get('task_arn', '')
-        self.container_instance_arn = state.get('container_instance_arn', '')
+        self.task_ip = state.get('task_ip', '')
+        self.task_port = state.get('task_port', 0)
 
     def get_state(self):
         ''' Misleading name: the return value of get_state is saved to the database in order
@@ -76,24 +77,25 @@ class EcsSpawner(Spawner):
             1
 
     async def start(self):
-        # Not entirely sure what happens if the hub goes down half way though a startup:
-        # will the details of the task be saved / restored from the database?
-        # This is coded up to be able to deal with both "yes" and "no"
+        # We sure we can resume during an interrupted startup
+        # The sleeps are to work well with the "progress" generator
 
-        self.has_task_arn = tornado.concurrent.Future()
-        self.has_task_ip = tornado.concurrent.Future()
-        self.has_server_started = tornado.concurrent.Future()
+        self.has_task_arn = Future()
+        self.has_task_ip = Future()
+        self.has_server_started = Future()
         self.num_polls = 0
 
         if self.task_arn == '':
             try:
                 self.calling_run_task = True
-                run_response = await _run_task(self.log, self.endpoint)
+                run_response = await _run_task(self.log, self.endpoint, self.cmd + ['--debug'], self.get_env())
                 self.task_arn = run_response['tasks'][0]['taskArn']
                 self.log.debug("Set task arn to (%s)", self.task_arn)
-                self.has_task_arn.set_result(None)
             finally:
                 self.calling_run_task = False
+
+        self.has_task_arn.set_result(None)
+        await gen.sleep(1)
 
         if self.task_ip == '' or self.task_port == 0:
             while True:
@@ -110,12 +112,16 @@ class EcsSpawner(Spawner):
                     self.task_port = port
                     self.log.debug("Set task ip to (%s)", self.task_ip)
                     self.log.debug("Set task port to (%s)", self.task_port)
-                    self.has_task_ip.set_result(None)
                     break
 
                 await gen.sleep(1)
 
+        self.has_task_ip.set_result(None)
+        await gen.sleep(1)
+
         self.has_server_started.set_result(None)
+        await gen.sleep(1)
+
         return (self.task_ip, self.task_port)
 
     async def stop(self, now=False):
@@ -128,30 +134,35 @@ class EcsSpawner(Spawner):
 
     async def progress(self):
         yield {
-            'progress': 10
+            'progress': 10,
             'message': 'Starting server... assigning ID',
         }
+
         await self.has_task_arn
         yield {
-            'progress': 20
+            'progress': 20,
             'message': f'Starting server... assigned ID {self.task_arn}',
         }
 
+        await gen.sleep(1)
         yield {
             'message': f'Starting server... assigning IP address...',
         }
-        await self.has_ip_address
+
+        await self.has_task_ip
         yield {
-            'progress': 30
+            'progress': 30,
             'message': f'Starting server... assigned IP address {self.task_ip}',
         }
         
+        await gen.sleep(1)
         yield {
             'message': f'Starting server... launching container. May take a few minutes.',
         }
+
         await self.has_server_started
         yield {
-            "progress": 100
+            "progress": 100,
             "message": 'Server has started',
         }
         await gen.sleep(1)
@@ -194,10 +205,22 @@ async def _describe_tasks(logger, endpoint, task_arns):
     })
 
 
-async def _run_task(logger, endpoint):
+async def _run_task(logger, endpoint, command_and_args, env):
     return await _make_ecs_request(logger, endpoint, 'RunTask', {
         'cluster': endpoint['cluster_name'],
         'taskDefinition': endpoint['task_definition_arn'],
+        'overrides': {
+            'containerOverrides': [{
+                'command': command_and_args,
+                'environment': [
+                    {
+                        'name': name,
+                        'value': value,
+                    } for name, value in env.items()
+                ],
+                'name': 'jupyterhub-singleuser',
+            }],
+        },
         'count': 1,
         'launchType': 'FARGATE',
         'networkConfiguration': {
@@ -205,15 +228,8 @@ async def _run_task(logger, endpoint):
                 'assignPublicIp': 'ENABLED',
                 'securityGroups': ['sg-00062fd201d4e674b'],
                 'subnets': ['subnet-fde8d88a'],
-            }
-        }
-    })
-
-
-async def _stop_task(logger, endpoint, task_arn):
-    return await _make_ecs_request(logger, endpoint, 'RunTask', {
-        'cluster': endpoint['cluster_name'],
-        'task': task_arn,
+            },
+        },
     })
 
 

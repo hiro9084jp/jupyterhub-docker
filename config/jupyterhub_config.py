@@ -48,6 +48,7 @@ c.JupyterHub.spawner_class = EcsSpawner
 c.EcsSpawner.endpoint = {
     'cluster_name': os.environ['ECS_SPAWNER__CUSTER_NAME'],
     'task_definition_arn': os.environ['ECS_SPAWNER__TASK_DEFINITION_ARN'],
+    'launch_type': 'FARGATE',
     'security_groups': [os.environ['ECS_SPAWNER__SECURITY_GROUP']],
     'subnets': [os.environ['ECS_SPAWNER__SUBNET']],
     'region': os.environ['ECS_SPAWNER__REGION'],

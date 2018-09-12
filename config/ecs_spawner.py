@@ -179,7 +179,7 @@ async def _run_task(logger, endpoint, command_and_args, env):
             }],
         },
         'count': 1,
-        'launchType': 'FARGATE',
+        'launchType': endpoint['launch_type'],
         'networkConfiguration': {
             'awsvpcConfiguration': {
                 'assignPublicIp': 'DISABLED',
